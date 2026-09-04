@@ -1,0 +1,26 @@
+bundle:
+  name: saas_lakehouse_pipeline
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-placeholder.cloud.databricks.com
+    variables:
+      target_env: dev
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      target_env: prod
+
+variables:
+  target_env:
+    description: Target environment schema namespace
+    default: dev
