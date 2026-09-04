@@ -1,13 +1,14 @@
 bundle:
   name: saas_lakehouse_pipeline
-
-include:
-  - resources/*.yml
+  include:
+    - resources/*.yml
 
 targets:
   dev:
     mode: development
     default: true
+    workspace:
+      host: https://dbc-5fc12f44-8585.cloud.databricks.com
     variables:
       target_env: dev
 
