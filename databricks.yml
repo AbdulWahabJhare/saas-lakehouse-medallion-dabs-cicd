@@ -8,8 +8,6 @@ targets:
   dev:
     mode: development
     default: true
-    workspace:
-      host: https://dbc-placeholder.cloud.databricks.com
     variables:
       target_env: dev
 
