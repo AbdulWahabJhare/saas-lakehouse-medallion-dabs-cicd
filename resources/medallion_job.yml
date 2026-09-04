@@ -1,0 +1,47 @@
+resources:
+  jobs:
+    nexusmetrics_medallion_pipeline:
+      name: "NexusMetrics_Enterprise_Pipeline_${var.target_env}"
+      
+      schedule:
+        quartz_cron_expression: "0 0 7 * * ?" # 7:00 AM Daily
+        timezone_id: "Asia/Kolkata"
+
+      tasks:
+        - task_key: 01_bronze_ingestion
+          notebook_task:
+            notebook_path: ../src/01_bronze_ingestion.py
+            base_parameters:
+              env: ${var.target_env}
+
+        - task_key: 02_silver_transformation
+          depends_on:
+            - task_key: 01_bronze_ingestion
+          notebook_task:
+            notebook_path: ../src/02_silver_transformation.py
+            base_parameters:
+              env: ${var.target_env}
+
+        - task_key: 03_gold_business_aggregations
+          depends_on:
+            - task_key: 02_silver_transformation
+          notebook_task:
+            notebook_path: ../src/03_gold_business_aggregations.py
+            base_parameters:
+              env: ${var.target_env}
+
+        - task_key: 04_ml_churn_propensity
+          depends_on:
+            - task_key: 03_gold_business_aggregations
+          notebook_task:
+            notebook_path: ../src/04_ml_churn_propensity_prediction.py
+            base_parameters:
+              env: ${var.target_env}
+
+        - task_key: 05_powerbi_semantic_views
+          depends_on:
+            - task_key: 04_ml_churn_propensity
+          notebook_task:
+            notebook_path: ../src/05_powerbi_semantic_views.py
+            base_parameters:
+              env: ${var.target_env}
