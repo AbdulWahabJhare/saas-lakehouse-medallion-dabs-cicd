@@ -25,29 +25,42 @@ spark.sql(f"USE CATALOG {catalog_name}")
 spark.sql(f"USE SCHEMA {gold_schema}")
 
 # COMMAND ----------
-# 2. Load Input Feature Data from Gold Customer 360 Features
+# 2. Load Input Feature Data & Dynamically Detect Numeric Columns
 df_features = spark.table(f"{catalog_name}.{gold_schema}.gold_customer_360_features")
 
-# Determine MRR column name dynamically to prevent column resolution issues
-mrr_col = "total_mrr" if "total_mrr" in df_features.columns else "mrr_amount"
-sub_col = "active_subscriptions" if "active_subscriptions" in df_features.columns else [c for c in df_features.columns if "sub" in c][0]
+print("Available columns in table:", df_features.columns)
 
-# Standardize column aliases for downstream modeling stages
-df_prep = (
-    df_features
-    .withColumn("mrr_feature", F.col(mrr_col).cast("double"))
-    .withColumn("subs_feature", F.col(sub_col).cast("double"))
-)
+# Exclude identifier, label, and timestamp columns from feature selection
+excluded_cols = ["customer_id", "is_churned", "processed_at", "updated_at", "created_at", "inference_timestamp"]
+numeric_types = ["IntegerType", "LongType", "DoubleType", "FloatType", "DecimalType", "ByteType", "ShortType"]
 
-# Derive binary churn label if not explicitly present
+feature_cols = [
+    field.name for field in df_features.schema.fields 
+    if any(num_t in str(field.dataType) for num_t in numeric_types) and field.name not in excluded_cols
+]
+
+# Fallback: if data types are not strictly typed numeric, pick up to two non-excluded columns
+if not feature_cols:
+    feature_cols = [c for c in df_features.columns if c not in excluded_cols][:2]
+
+print("Selected feature columns for model:", feature_cols)
+
+# Ensure numeric cast for selected features
+df_prep = df_features
+for col_name in feature_cols:
+    df_prep = df_prep.withColumn(col_name, F.col(col_name).cast("double"))
+
+# Derive binary churn label if not present
 if "is_churned" not in df_prep.columns:
+    primary_feat = feature_cols[0]
     df_prep = df_prep.withColumn(
         "is_churned",
-        F.when((F.col("mrr_feature") <= 0) | (F.col("subs_feature") == 0), 1.0).otherwise(0.0)
+        F.when(F.col(primary_feat) <= 0, 1.0).otherwise(0.0)
     )
+else:
+    df_prep = df_prep.withColumn("is_churned", F.col("is_churned").cast("double"))
 
-# Prepare modeling dataset and handle null records
-feature_cols = ["mrr_feature", "subs_feature"]
+# Prepare modeling dataset and handle null values
 df_dataset = df_prep.select(["customer_id", "is_churned"] + feature_cols).dropna()
 
 # 80/20 Train-Test Split
@@ -83,10 +96,10 @@ ml_pipeline = Pipeline(stages=[assembler, scaler, lr])
 mlflow.set_experiment(f"/Shared/nexusmetrics_churn_{env}")
 
 with mlflow.start_run(run_name=f"churn_logistic_regression_{env}") as run:
-    # Train the pipeline
+    # Train pipeline
     model = ml_pipeline.fit(train_df)
     
-    # Run predictions on holdout test set
+    # Run inference on holdout test set
     test_predictions = model.transform(test_df)
     
     # Evaluate performance
@@ -133,7 +146,7 @@ with mlflow.start_run(run_name=f"churn_logistic_regression_{env}") as run:
 # 5. Score Full Dataset & Persist to Gold Delta Table
 scored_df = model.transform(df_dataset)
 
-# Extract class 1 probability score (churn propensity)
+# Extract probability for churned class (index 1)
 extract_prob_udf = F.udf(lambda v: float(v[1]), DoubleType())
 
 df_final_scored = (
@@ -141,8 +154,7 @@ df_final_scored = (
     .withColumn("churn_risk_score", extract_prob_udf(F.col("probability")))
     .select(
         "customer_id",
-        F.col("mrr_feature").alias("mrr_amount"),
-        F.col("subs_feature").alias("active_subscriptions"),
+        *feature_cols,
         "is_churned",
         "churn_risk_score",
         F.col("prediction").cast("integer").alias("predicted_churn_flag"),
@@ -153,4 +165,4 @@ df_final_scored = (
 output_table = f"{catalog_name}.{gold_schema}.fct_churn_propensity_scored"
 df_final_scored.write.mode("overwrite").format("delta").saveAsTable(output_table)
 
-print(f"Successfully generated churn predictions and persisted to {output_table}.")
+print(f"Successfully saved {df_final_scored.count()} predictions to {output_table}.")
