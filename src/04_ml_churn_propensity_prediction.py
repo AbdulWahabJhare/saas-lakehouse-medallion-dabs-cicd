@@ -4,6 +4,7 @@
 # MAGIC Trains a Logistic Regression model via PySpark MLlib and logs runs to MLflow.
 
 # COMMAND ----------
+import os
 import mlflow
 import mlflow.spark
 from pyspark.ml import Pipeline
@@ -24,11 +25,14 @@ gold_schema = "gold"
 spark.sql(f"USE CATALOG {catalog_name}")
 spark.sql(f"USE SCHEMA {gold_schema}")
 
+# Ensure a Unity Catalog Volume exists for Serverless MLflow model logging
+spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog_name}.{gold_schema}.mlflow_artifacts")
+os.environ["MLFLOW_DFS_TMP"] = f"/Volumes/{catalog_name}/{gold_schema}/mlflow_artifacts"
+
 # COMMAND ----------
 # 2. Load Input Feature Data from Gold Customer 360 Features
 df_features = spark.table(f"{catalog_name}.{gold_schema}.gold_customer_360_features")
 
-# Exact numerical feature columns present in gold_customer_360_features
 candidate_features = [
     "deal_value_arr",
     "pipeline_duration_days",
@@ -43,21 +47,17 @@ candidate_features = [
     "error_rate_pct"
 ]
 
-# Select only features that exist in the table
 feature_cols = [c for c in candidate_features if c in df_features.columns]
 
-# Ensure features and the label are cast to DoubleType
 df_prep = df_features
 for c in feature_cols:
     df_prep = df_prep.withColumn(c, F.col(c).cast("double"))
 
 df_prep = df_prep.withColumn("is_churned", F.col("is_churned").cast("double"))
 
-# Use org_id as the primary entity identifier
 id_col = "org_id" if "org_id" in df_prep.columns else df_prep.columns[0]
 df_dataset = df_prep.select([id_col, "is_churned"] + feature_cols).fillna(0.0)
 
-# 80/20 Train-Test Split
 train_df, test_df = df_dataset.randomSplit([0.8, 0.2], seed=42)
 
 # COMMAND ----------
@@ -90,13 +90,9 @@ ml_pipeline = Pipeline(stages=[assembler, scaler, lr])
 mlflow.set_experiment(f"/Shared/nexusmetrics_churn_{env}")
 
 with mlflow.start_run(run_name=f"churn_logistic_regression_{env}") as run:
-    # Fit model on training split
     model = ml_pipeline.fit(train_df)
-    
-    # Run inference on test holdout
     test_predictions = model.transform(test_df)
     
-    # Evaluate performance
     evaluator_roc = BinaryClassificationEvaluator(
         rawPredictionCol="rawPrediction",
         labelCol="is_churned",
@@ -117,20 +113,22 @@ with mlflow.start_run(run_name=f"churn_logistic_regression_{env}") as run:
     auc_pr = evaluator_pr.evaluate(test_predictions)
     accuracy = evaluator_acc.evaluate(test_predictions)
     
-    # Log hyperparameters
     mlflow.log_param("model_type", "LogisticRegression")
     mlflow.log_param("maxIter", 20)
     mlflow.log_param("regParam", 0.01)
     mlflow.log_param("elasticNetParam", 0.5)
     mlflow.log_param("feature_columns", feature_cols)
     
-    # Log metrics
     mlflow.log_metric("auc_roc", auc_roc)
     mlflow.log_metric("auc_pr", auc_pr)
     mlflow.log_metric("accuracy", accuracy)
     
-    # Log model artifact
-    mlflow.spark.log_model(model, "spark_model")
+    # Pass the UC Volume path explicitly for Serverless compatibility
+    mlflow.spark.log_model(
+        model, 
+        "spark_model", 
+        dfs_tmpdir=f"/Volumes/{catalog_name}/{gold_schema}/mlflow_artifacts"
+    )
     
     print(f"MLflow Run ID: {run.info.run_id}")
     print(f"Test AUC-ROC: {auc_roc:.4f}")
@@ -140,7 +138,6 @@ with mlflow.start_run(run_name=f"churn_logistic_regression_{env}") as run:
 # 5. Score Full Dataset & Persist to Gold Delta Table
 scored_df = model.transform(df_dataset)
 
-# Extract probability for churned class (index 1)
 extract_prob_udf = F.udf(lambda v: float(v[1]), DoubleType())
 
 df_final_scored = (
