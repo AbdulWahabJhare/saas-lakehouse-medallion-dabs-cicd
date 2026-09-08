@@ -108,9 +108,7 @@ NexusMetrics abandons manual workspace configurations in favor of declarative in
 
 The presentation layer utilizes a native Databricks AI/BI Lakeview Executive Dashboard, configured to fit cleanly into a single-screen 1080p viewport without vertical scrolling.
 
-![NexusMetrics Executive Churn Command Center](./assets/dashboard_executive_summary.png)
-
-*(Ensure your repository's assets path aligns with `./assets/dashboard_executive_summary.png`, or update the path above to match your own image directory.)*
+![NexusMetrics Executive Churn Command Center](Dashboard.png)
 
 **Dashboard Visual Hierarchy:**
 
